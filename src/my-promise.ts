@@ -74,8 +74,6 @@ enum PromiseStatus {
     REJECTED = 'rejected',
 }
 
-type MyPromiseLike<T = any> = { then: MyPromise<T>['then'] };
-
 // 返回callback的异步执行函数版本
 function nextTick(callback: ((...args: any[]) => any) | undefined | null) {
     return () => setTimeout(() => callback && callback());
@@ -91,9 +89,9 @@ function nextTick(callback: ((...args: any[]) => any) | undefined | null) {
  */
 function resolvePromise<T = any>(
     promise2: MyPromise<T>,
-    x: T,
-    resolve: (value?: T) => void,
-    reject: (value?: any) => void
+    x: T | PromiseLike<T>,
+    resolve: (value: T | PromiseLike<T>) => void,
+    reject: (value: any) => void
 ) {
     // 在onFulfilled中返回自身的情况，将造成循环引用
     if ((promise2 as any) === x) {
@@ -111,7 +109,7 @@ function resolvePromise<T = any>(
 
     // x为对象/函数，将其当作thenable尝试执行
     if (x !== null && (typeof x === 'object' || typeof x === 'function')) {
-        let then: MyPromiseLike<T>['then'];
+        let then: PromiseLike<T>['then'];
         try {
             then = (x as any).then;
         } catch (e) {
@@ -161,14 +159,14 @@ function resolvePromise<T = any>(
 class MyPromise<T> {
     // 初始化Promise实例
     PromiseState: PromiseStatus = PromiseStatus.PENDING;
-    PromiseResult?: T = null as unknown as T;
+    PromiseResult: T = null as unknown as T;
     onFulfilledCallbacks: (((value: any) => any) | undefined | null)[] = []; // 成功回调保存: then执行时为pending状态，先将回调保存，等待resolve执行后再取出执行 | 用数组缓存，也同时实现了一个Promise能被多次then
     onRejectedCallbacks: (((reason: any) => any) | undefined | null)[] = []; // 失败回调保存: ~
 
     constructor(
         executor: (
-            resolve: (value?: T) => void,
-            reject: (reason?: any) => void
+            resolve: (value: T | PromiseLike<T>) => void,
+            reject: (reason: any) => void
         ) => void
     ) {
         // 执行Promise回调（PS:这里用bind绑定实例的this环境，因为二者要作为参数传递到外部【executor】函数作用域环境中调用，会丢失class实例的this）
@@ -180,17 +178,17 @@ class MyPromise<T> {
         }
     }
 
-    resolve(value?: T) {
+    resolve(value: T | PromiseLike<T>) {
         // resolve后，将pending状态改为fulfilled（PS:这里存在判断而非直接修改，遵循上面原则 1. 当状态非 pending 后，将无法在修改状态）
         if (this.PromiseState === PromiseStatus.PENDING) {
             this.PromiseState = PromiseStatus.FULFILLED;
-            this.PromiseResult = value;
+            this.PromiseResult = value as T;
             this.onFulfilledCallbacks.forEach((fn) => fn && fn(value)); // 执行已订阅的resolve回调
             this.#clearCallbacks();
         }
     }
 
-    reject(reason?: any) {
+    reject(reason: any) {
         if (this.PromiseState === PromiseStatus.PENDING) {
             this.PromiseState = PromiseStatus.REJECTED;
             this.PromiseResult = reason;
@@ -215,8 +213,14 @@ class MyPromise<T> {
      * @returns
      */
     then<TResult = T, TReason = never>(
-        onFulfilled?: ((value?: T) => TResult) | undefined | null,
-        onRejected?: ((reason?: any) => TReason) | undefined | null
+        onFulfilled?:
+            | ((value: T) => TResult | PromiseLike<TResult>)
+            | undefined
+            | null,
+        onRejected?:
+            | ((reason: any) => TReason | PromiseLike<TReason>)
+            | undefined
+            | null
     ): MyPromise<TResult | TReason> {
         const newPromise = new MyPromise<TResult | TReason>(
             (resolve, reject) => {
@@ -288,7 +292,7 @@ class MyPromise<T> {
      * @returns
      */
     static resolve<TResult>(
-        value?: TResult | MyPromise<TResult> | MyPromiseLike<TResult>
+        value?: TResult | MyPromise<TResult> | PromiseLike<TResult>
     ): MyPromise<TResult> {
         // 如果value就是一个Promise，则直接返回该promise即可
         if (value instanceof MyPromise) {
@@ -317,56 +321,80 @@ class MyPromise<T> {
      * @param {Symbol.iterator} iterator 可迭代类型
      * @returns {MyPromise<Awaited<T>[]>}
      */
-    static all<T = any>(
-        iterator:
-            | Array<T | { then: MyPromiseLike<T> } | MyPromise<T>>
-            | Map<any, T | { then: MyPromiseLike<T> } | MyPromise<T>>
-            | Set<T | { then: MyPromiseLike<T> }>
-    ): MyPromise<T[]> {
+    static all<T>(
+        iterator: Iterable<T | PromiseLike<T>> | Array<T | PromiseLike<T>>
+    ): MyPromise<Awaited<T[]>> {
         return new MyPromise<T[]>((resolve, reject) => {
             if (typeof iterator[Symbol.iterator] !== 'function') {
-                reject(new TypeError('argument is not iterable'));
+                return reject(new TypeError('argument is not iterable'));
+            }
+            let iteratorArr: Array<T | PromiseLike<T>> = [];
+            const result: T[] = [];
+            let count = 0;
+
+            if (typeof iterator === 'object' && 'size' in iterator) {
+                iteratorArr = Array.from(iterator).map(
+                    (v) => (v as Array<T | PromiseLike<T>>)[1]
+                );
             } else {
-                const result: T[] = [];
-                let count = 0;
-                let size = 0;
+                iteratorArr = Array.from(iterator);
+            }
 
-                // 如果传入的是一个空迭代对象，则直接返回完成状态
-                size =
-                    'size' in iterator
-                        ? (iterator as Map<any, any> | Set<any>).size
-                        : (iterator as any[]).length;
-                if (!size) {
-                    return resolve(result);
-                }
+            const length = iteratorArr.length;
 
-                (iterator as Array<T | { then: MyPromiseLike<T> }>).forEach(
-                    (promise, index) => {
-                        if (promise instanceof MyPromise) {
-                            MyPromise.resolve(promise).then(
-                                (value) => {
-                                    // 将结果按顺序保存下来
-                                    count++;
-                                    result[index] = value;
-                                    count === size && resolve(result);
-                                },
-                                (reason) => {
-                                    // 一旦遇到reject，直接返回
-                                    reject(reason);
-                                }
-                            );
-                        } else {
-                            count++;
-                            result[index] = promise as T;
-                            count === size && resolve(result); // 检测所有的都完成了时，fulfilled
-                        }
+            // 如果传入的是一个空迭代对象，则直接返回完成状态
+            if (!length) {
+                return resolve(result);
+            }
+
+            iteratorArr.forEach((promise, index) => {
+                MyPromise.resolve(promise).then(
+                    (value) => {
+                        // 将结果按顺序保存下来
+                        count++;
+                        result[index] = value;
+                        count === length && resolve(result);
+                    },
+                    (reason) => {
+                        // 一旦遇到reject，直接返回
+                        reject(reason);
                     }
                 );
-            }
+            });
         });
     }
 
-    static race() {}
+    /**
+     * 竞发
+     * 当某个promise变为fulfilled/rejected时结束
+     */
+    static race<T>(
+        iterator: Iterable<T | PromiseLike<T>> | Array<T | PromiseLike<T>>
+    ): MyPromise<T> {
+        return new MyPromise<T>((resolve, reject) => {
+            if (typeof iterator[Symbol.iterator] !== 'function') {
+                return reject(new TypeError('argument is not iterable'));
+            }
+            let iteratorArr: Array<T | PromiseLike<T>> = [];
+
+            if (typeof iterator === 'object' && 'size' in iterator) {
+                iteratorArr = Array.from(iterator).map(
+                    (v) => (v as Array<T | PromiseLike<T>>)[1]
+                );
+            } else {
+                iteratorArr = Array.from(iterator);
+            }
+
+            // 如果传入的是一个空迭代对象，则直接返回完成状态
+            if (!iteratorArr.length) {
+                return resolve(null as unknown as T);
+            }
+
+            iteratorArr.forEach((promise) =>
+                MyPromise.resolve(promise).then(resolve, reject)
+            );
+        });
+    }
 
     static allSettled() {}
 
@@ -386,67 +414,3 @@ class MyPromise<T> {
 }
 
 export default MyPromise;
-
-// const testPromise = new MyPromise<string>((resolve, reject) => {
-//     setTimeout(() => resolve('1'), 1000);
-// });
-
-// testPromise
-//     .then<2>((s) => {
-//         console.log('first:', s);
-//         return 2;
-//     })
-//     .then((r) => console.log('second:', r))
-//     .catch((e) => console.log('err:', e));
-
-// // 循环引用错误
-// const circularRefError: MyPromise<any> = testPromise.then<MyPromise<any>>(
-//     (r) => circularRefError
-// );
-// circularRefError.catch<any>((e) => console.error('错误handle: ', e));
-
-// // 嵌套Promise返回
-// const nestPromise = new MyPromise((resolve, reject) => {
-//     resolve();
-// });
-// nestPromise
-//     .then((val) => {
-//         return new MyPromise<string>((res) => res('nest promise'));
-//     })
-//     .then((nest) => console.log(nest));
-
-// MyPromise.resolve().then(res => MyPromise.reject('xzxldl')).then(null, s => console.log(s))
-
-// MyPromise.resolve()
-//     .then(() => {
-//         console.log(0);
-//         return MyPromise.resolve(4);
-//     })
-//     .then((res) => {
-//         console.log(res);
-//     });
-
-// MyPromise.resolve()
-//     .then(() => {
-//         console.log(1);
-//     })
-//     .then(() => {
-//         console.log(2);
-//     })
-//     .then(() => {
-//         console.log(3);
-//     })
-//     .then(() => {
-//         console.log(5);
-//     })
-//     .then(() => {
-//         console.log(6);
-//     });
-
-const m = new Map<any, MyPromise<number>>();
-m.set(1, new MyPromise((res) => res(1)));
-m.set(2, new MyPromise((res) => res(2)));
-m.set(3, new MyPromise((res) => res(3)));
-
-const a: MyPromise<number>[] = [new MyPromise((res, rej) => rej(1)), new MyPromise((res) => res(2)), new MyPromise((res) => res(3))]
-MyPromise.all<number>(a).then((res) => console.log(res)).catch(e => console.error(e));
