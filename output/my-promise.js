@@ -1,10 +1,4 @@
 "use strict";
-var __classPrivateFieldGet = (this && this.__classPrivateFieldGet) || function (receiver, state, kind, f) {
-    if (kind === "a" && !f) throw new TypeError("Private accessor was defined without a getter");
-    if (typeof state === "function" ? receiver !== state || !f : !state.has(receiver)) throw new TypeError("Cannot read private member from an object whose class did not declare it");
-    return kind === "m" ? f : kind === "a" ? f.call(receiver) : f ? f.value : state.get(receiver);
-};
-var _MyPromise_instances, _MyPromise_clearCallbacks;
 Object.defineProperty(exports, "__esModule", { value: true });
 var PromiseStatus;
 (function (PromiseStatus) {
@@ -23,8 +17,7 @@ function resolvePromise(promise2, x, resolve, reject) {
         x.then((xValue) => resolvePromise(promise2, xValue, resolve, reject), reject);
         return;
     }
-    if (x !== null &&
-        (typeof x === 'object' || typeof x === 'function')) {
+    if (x !== null && (typeof x === 'object' || typeof x === 'function')) {
         let then;
         try {
             then = x.then;
@@ -66,7 +59,6 @@ function resolvePromise(promise2, x, resolve, reject) {
 }
 class MyPromise {
     constructor(executor) {
-        _MyPromise_instances.add(this);
         this.PromiseState = PromiseStatus.PENDING;
         this.PromiseResult = null;
         this.onFulfilledCallbacks = [];
@@ -83,7 +75,7 @@ class MyPromise {
             this.PromiseState = PromiseStatus.FULFILLED;
             this.PromiseResult = value;
             this.onFulfilledCallbacks.forEach((fn) => fn && fn(value));
-            __classPrivateFieldGet(this, _MyPromise_instances, "m", _MyPromise_clearCallbacks).call(this);
+            this.clearCallbacks();
         }
     }
     reject(reason) {
@@ -91,8 +83,12 @@ class MyPromise {
             this.PromiseState = PromiseStatus.REJECTED;
             this.PromiseResult = reason;
             this.onRejectedCallbacks.forEach((fn) => fn && fn(reason));
-            __classPrivateFieldGet(this, _MyPromise_instances, "m", _MyPromise_clearCallbacks).call(this);
+            this.clearCallbacks();
         }
+    }
+    clearCallbacks() {
+        this.onFulfilledCallbacks = [];
+        this.onRejectedCallbacks = [];
     }
     then(onFulfilled, onRejected) {
         const newPromise = new MyPromise((resolve, reject) => {
@@ -140,19 +136,86 @@ class MyPromise {
     catch(onRejected) {
         return this.then(undefined, onRejected);
     }
+    finally(callback) {
+        return this.then((value) => MyPromise.resolve(callback()).then(() => value), (reason) => MyPromise.resolve(callback()).then(() => {
+            throw reason;
+        }));
+    }
     static resolve(value) {
-        return new MyPromise((resolve) => {
-            resolve(value);
-        });
+        if (value instanceof MyPromise) {
+            return value;
+        }
+        else if (value !== null &&
+            typeof value === 'object' &&
+            'then' in value) {
+            return new MyPromise((resolve, reject) => value.then(resolve, reject));
+        }
+        return new MyPromise((resolve) => resolve(value));
     }
     static reject(reason) {
-        return new MyPromise((_resolve, reject) => {
-            reject(reason);
+        return new MyPromise((_resolve, reject) => reject(reason));
+    }
+    static all(iterator) {
+        return new MyPromise((resolve, reject) => {
+            if (typeof iterator[Symbol.iterator] !== 'function') {
+                return reject(new TypeError('argument is not iterable'));
+            }
+            const iteratorArr = Array.from(iterator);
+            const result = [];
+            let count = 0;
+            const length = iteratorArr.length;
+            if (!length) {
+                return resolve(result);
+            }
+            iteratorArr.forEach((promise, index) => {
+                MyPromise.resolve(promise).then((value) => {
+                    count++;
+                    result[index] = value;
+                    count === length && resolve(result);
+                }, (reason) => {
+                    reject(reason);
+                });
+            });
         });
     }
-    static all() { }
-    static race() { }
-    static allSettled() { }
+    static race(iterator) {
+        return new MyPromise((resolve, reject) => {
+            if (typeof iterator[Symbol.iterator] !== 'function') {
+                return reject(new TypeError('argument is not iterable'));
+            }
+            const iteratorArr = Array.from(iterator);
+            if (!iteratorArr.length) {
+                return resolve(null);
+            }
+            iteratorArr.forEach((promise) => MyPromise.resolve(promise).then(resolve, reject));
+        });
+    }
+    static allSettled(iterator) {
+        return new MyPromise((resolve, reject) => {
+            if (typeof iterator[Symbol.iterator] !== 'function') {
+                return reject(new TypeError('argument is not iterable'));
+            }
+            let count = 0;
+            const iteratorArr = Array.from(iterator);
+            const result = [];
+            if (!iteratorArr.length) {
+                return resolve(result);
+            }
+            function handleAllSettledPromise(index, key, value) {
+                count++;
+                result[index] = {
+                    status: key === 'reason'
+                        ? PromiseStatus.REJECTED
+                        : PromiseStatus.FULFILLED,
+                    [key]: value,
+                };
+                count === iteratorArr.length && resolve(result);
+            }
+            iteratorArr.forEach((promise, index) => {
+                MyPromise.resolve(promise).then(handleAllSettledPromise.bind(null, index, 'value'), handleAllSettledPromise.bind(null, index, 'reason'));
+            });
+        });
+    }
     static deferred() {
         let result = {};
         result.promise = new MyPromise((resolve, reject) => {
@@ -162,27 +225,5 @@ class MyPromise {
         return result;
     }
 }
-_MyPromise_instances = new WeakSet(), _MyPromise_clearCallbacks = function _MyPromise_clearCallbacks() {
-    this.onFulfilledCallbacks = [];
-    this.onRejectedCallbacks = [];
-};
-const d = MyPromise.deferred();
-console.log(d);
 exports.default = MyPromise;
-MyPromise.resolve().then(() => {
-    console.log(0);
-    return MyPromise.resolve(4);
-}).then((res) => {
-    console.log(res);
-});
-MyPromise.resolve().then(() => {
-    console.log(1);
-}).then(() => {
-    console.log(2);
-}).then(() => {
-    console.log(3);
-}).then(() => {
-    console.log(5);
-}).then(() => {
-    console.log(6);
-});
+module.exports = MyPromise;

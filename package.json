@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "build": "tsc",
     "test": "promises-aplus-tests output/my-promise"
   },
   "keywords": [],
