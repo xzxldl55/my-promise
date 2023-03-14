@@ -79,13 +79,13 @@ enum PromiseStatus {
 
 // 返回callback的异步执行函数版本
 function nextTick(callback: ((...args: any[]) => any) | undefined | null) {
-    return () => setTimeout(() => callback && callback());
+    return () => queueMicrotask(() => callback && callback());
 }
 
 /**
  * resolve()、reject() 进行改造增强 针对resolve()和reject()中不同值情况 进行处理(参考Promise/A+规范 [[Resolve]](promise2, x) 解决过程)
  * 正常处理流程即用resolve返回（onRejected的返回值按照规范也会作为fulfilledValue，故也用resolve返回）
- * @param {MyPromise<T>} promise2 promise1.then方法返回的新的promise对象
+ * @param {MyPromise<T>} promise2 promise1.then方法返回的新的promise对象 --> 这里用于检查循环引用问题
  * @param {O} x promise1中onFulfilled或onRejected的返回值
  * @param {(value: any) => any} resolve promise2的resolve方法
  * @param {(value: any) => any} reject promise2的reject方法
@@ -101,8 +101,10 @@ function resolvePromise<T = any>(
         throw new TypeError('Chaining cycle detected for promise');
     }
 
-    // x 为 promise 对象的情况
+    // x 为 promise 对象的情况 --> PS:Chrome V8的实现不同，当 V8 发现 onFulfilled 返回值是一个Promise时，会将下面的解析函数包装一下（NewPromiseResolveThenableJob），并放到微任务中执行
+    //  故此，再 V8 中，对于 onFulfilled 返回 Promise 的情况，会嵌套两层微任务（NewPromiseResolveThenableJob 一层，下面解析代码 x.then 一层）
     if (x instanceof MyPromise) {
+        // 把下面的解析处理，包一层 nextTick 则我们的 MyPromise 返回就与 V8 一致了
         x.then(
             (xValue) => resolvePromise(promise2, xValue, resolve, reject),
             reject
@@ -122,8 +124,18 @@ function resolvePromise<T = any>(
         if (typeof then !== 'function') {
             resolve(x);
         } else {
-            // then为函数，执行，将其当作then执行
-            // 如果 resolvePromise 和 rejectPromise 均被调用，或者被同一参数调用了多次，则优先采用首次调用并忽略剩下的调用
+            // then 为函数，将其当作 Promise.then 执行 ==> 即针对 onFulfilled 中 return PromiseLike 的情况
+            // 用 called 控制如果 resolvePromise 和 rejectPromise 均被调用，或者被同一参数调用了多次，则优先采用首次调用并忽略剩下的调用
+            /**
+             * eg: 
+             * {
+             *      then: (resolve, reject) {
+             *          resolve(1);
+             *          resolve(2); // 被忽略
+             *          resolve(3); // 被忽略
+             *      }
+             * }
+             */
             let called = false;
             try {
                 then.call(
@@ -230,7 +242,7 @@ class MyPromise<T> {
                 const execOnFulfilled = () => {
                     try {
                         if (typeof onFulfilled !== 'function') {
-                            resolve(this.PromiseResult as unknown as TResult);
+                            resolve(this.PromiseResult as unknown as TResult); // 未传onFulfilled时，默认设为 v => v 传递到下游
                         } else {
                             const x = onFulfilled(this.PromiseResult);
                             resolvePromise<TResult>(
@@ -445,7 +457,7 @@ class MyPromise<T> {
         });
     }
 
-    // promises-aplus-tests 测试使用
+    // promises-aplus-tests 测试 Promise A+ 标准使用
     static deferred() {
         let result: {
             promise?: MyPromise<any>;

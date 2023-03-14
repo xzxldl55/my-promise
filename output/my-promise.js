@@ -7,7 +7,7 @@ var PromiseStatus;
     PromiseStatus["REJECTED"] = "rejected";
 })(PromiseStatus || (PromiseStatus = {}));
 function nextTick(callback) {
-    return () => setTimeout(() => callback && callback());
+    return () => queueMicrotask(() => callback && callback());
 }
 function resolvePromise(promise2, x, resolve, reject) {
     if (promise2 === x) {
